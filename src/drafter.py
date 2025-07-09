@@ -1,4 +1,5 @@
 import aiohttp
+import json
 import os
 import random
 from dataclasses import dataclass, field
@@ -88,6 +89,7 @@ class Draft:
         default_factory=list
     )  # List of available strategy orders for the draft
     map_url: str = ""  # URL for the generated map
+    draft_direction: int = 1
 
     async def initialize(self):
         """Generate a map using the TI4 map generator."""
@@ -95,13 +97,61 @@ class Draft:
             # Generate a random seed for the map
             player_count = len(self.players)
             seed = random.randint(1, 9999)
-            url = (
+            self.map_url = (
                 f"https://keeganw.github.io/ti4/?settings=FFFFF{player_count}000"
                 f"{seed}FFF"
             )
-            self.map_url = url
-            self.available_locations = list(range(1, player_count))
-            self.available_strategies = list(range(1, player_count))
+            self.available_locations = list(range(1, player_count + 1))
+            self.available_strategies = list(range(1, player_count + 1))
+
+    async def save(self):
+        """Save the draft state to a file."""
+        with open(f"draft_{self.channel_id}.json", "w") as f:
+            data = {
+                "channel_id": self.channel_id,
+                "players": self.players,
+                "phase": self.phase,
+                "player_factions": self.player_factions,
+                "selected_factions": self.selected_factions,
+                "optional_factions": list(self.optional_factions),
+                "votes": {k: list(v) for k, v in self.votes.items()},
+                "final_factions": list(self.final_factions),
+                "draft_order": self.draft_order,
+                "current_picker": self.current_picker,
+                "draft_round": self.draft_round,
+                "player_choices": self.player_choices,
+                "available_locations": self.available_locations,
+                "available_strategies": self.available_strategies,
+                "map_url": self.map_url,
+            }
+            json.dump(data, f, indent=4)
+
+    @classmethod
+    def load(cls, channel_id: int):
+        """Load a draft state from a file."""
+        try:
+            with open(f"draft_{channel_id}.json", "r") as f:
+                data = json.load(f)
+                draft = cls(
+                    channel_id=data["channel_id"],
+                    players=data["players"],
+                    phase=data["phase"],
+                    player_factions=data["player_factions"],
+                    selected_factions=data["selected_factions"],
+                    optional_factions=set(data["optional_factions"]),
+                    votes={k: set(v) for k, v in data["votes"].items()},
+                    final_factions=set(data["final_factions"]),
+                    draft_order=data["draft_order"],
+                    current_picker=data["current_picker"],
+                    draft_round=data["draft_round"],
+                    player_choices=data["player_choices"],
+                    available_locations=data["available_locations"],
+                    available_strategies=data["available_strategies"],
+                    map_url=data["map_url"],
+                )
+                return draft
+        except FileNotFoundError:
+            return None
 
 
 @bot.event
@@ -119,7 +169,6 @@ async def start_draft(ctx):
     draft = Draft(channel_id=ctx.channel.id)
     active_drafts[ctx.channel.id] = draft
     await ctx.send("TI4 Faction Draft started! Use !join to join the draft.")
-    await ctx.send(f"Map URL: {draft.map_url}")
 
 
 @bot.command(name="join")
@@ -167,7 +216,7 @@ async def start_drafting(ctx):
         return
 
     draft.phase = 1
-    draft.initialize()
+    await draft.initialize()
 
     # Assign 4 random factions to each player (by index)
     all_indices = list(FACTION_INDEX.keys())
@@ -346,7 +395,7 @@ async def vote_faction(ctx, faction_index: int):
 
 
 @bot.command(name="pick")
-async def pick_selection(ctx, selection_type: str, *, value: str):
+async def pick_selection(ctx, selection_type: str, value: str):
     """Pick a faction, location, or strategy order."""
     if ctx.channel.id not in active_drafts:
         await ctx.send("No draft is currently in progress!")
@@ -426,10 +475,15 @@ async def pick_selection(ctx, selection_type: str, *, value: str):
         )
 
     # Move to next picker
-    draft.current_picker += 1
-    if draft.current_picker >= len(draft.draft_order):
-        draft.current_picker = 0
-        draft.draft_round += 1
+    draft.current_picker += draft.draft_direction
+    if draft.current_picker >= len(draft.draft_order) or draft.current_picker < 0:
+        # End of round: reverse direction and move to next round
+        draft.draft_direction *= -1
+        if draft.draft_direction == 1:
+            draft.draft_round += 1
+            draft.current_picker = 0
+        else:
+            draft.current_picker = len(draft.draft_order) - 1
 
     # Check if draft is complete
     all_choices_made = all(
@@ -454,11 +508,69 @@ async def pick_selection(ctx, selection_type: str, *, value: str):
         await ctx.send(f"Map URL: {draft.map_url}")
         del active_drafts[ctx.channel.id]
     else:
-        next_player = await bot.fetch_user(draft.draft_order[draft.current_picker])
+        next_player_id = draft.draft_order[draft.current_picker]
+        next_player = await bot.fetch_user(next_player_id)
+        # Show only categories the next player hasn't picked yet
+        choices = draft.player_choices[next_player_id]
+        messages = []
+        if choices["faction"] is None:
+            picked_factions = [
+                c["faction"]
+                for c in draft.player_choices.values()
+                if c["faction"] is not None
+            ]
+            available_factions = [
+                f"{idx}: {FACTION_INDEX[idx]}"
+                for idx in sorted(draft.final_factions)
+                if idx not in picked_factions
+            ]
+            messages.append(
+                f"Available factions: {', '.join(available_factions) if available_factions else 'None'}"
+            )
+        if choices["location"] is None:
+            messages.append(
+                f"Available locations: {', '.join(map(str, draft.available_locations)) if draft.available_locations else 'None'}"
+            )
+        if choices["strategy"] is None:
+            messages.append(
+                f"Available strategy orders: {', '.join(map(str, draft.available_strategies)) if draft.available_strategies else 'None'}"
+            )
+        if messages:
+            await ctx.send("\n".join(messages))
         await ctx.send(f"It's {next_player.mention}'s turn to pick!")
         await ctx.send(
             "Use !pick <faction/location/strategy> <value> to make your selection."
         )
+
+
+@bot.command(name="save")
+async def save_draft(ctx):
+    """Save the current draft state to a file."""
+    if ctx.channel.id not in active_drafts:
+        await ctx.send("No draft is currently in progress!")
+        return
+
+    draft = active_drafts[ctx.channel.id]
+    await draft.save()
+    await ctx.send("Draft state saved successfully!")
+
+
+@bot.command(name="load")
+async def load_draft(ctx):
+    """Load a draft state from a file."""
+    if ctx.channel.id in active_drafts:
+        await ctx.send("A draft is already in progress in this channel!")
+        return
+
+    draft = Draft.load(ctx.channel.id)
+    if not draft:
+        await ctx.send("No saved draft found for this channel!")
+        return
+
+    active_drafts[ctx.channel.id] = draft
+    await ctx.send("Draft state loaded successfully!")
+    await ctx.send(f"Map URL: {draft.map_url}")
+    await ctx.send(f"Current phase: {draft.phase}")
 
 
 @bot.command(name="list")

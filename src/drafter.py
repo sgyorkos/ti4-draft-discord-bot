@@ -98,7 +98,7 @@ class Draft:
             player_count = len(self.players)
             seed = random.randint(1, 9999)
             self.map_url = (
-                f"https://keeganw.github.io/ti4/?settings=FFFFF{player_count}000"
+                f"https://keeganw.github.io/ti4/?settings=TFFFF{player_count}000"
                 f"{seed}FFF"
             )
             self.available_locations = list(range(1, player_count + 1))
@@ -195,6 +195,7 @@ async def join_draft(ctx):
         "location": None,
         "strategy": None,
     }
+    await draft.save()  # Save after joining
     await ctx.send(
         f"{ctx.author.mention} has joined the draft! ({len(draft.players)} players). To"
         " start the draft, run the command !start"
@@ -211,7 +212,7 @@ async def start_drafting(ctx):
         return
 
     draft: Draft = active_drafts[ctx.channel.id]
-    if len(draft.players) < 1:  # TODO: Return this to 2
+    if len(draft.players) < 2:
         await ctx.send("Need at least 2 players to start drafting!")
         return
 
@@ -223,6 +224,8 @@ async def start_drafting(ctx):
     for player_id in draft.players:
         draft.player_factions[player_id] = random.sample(all_indices, 4)
 
+    await draft.save()  # Save after assigning factions
+
     # Send each player their factions (by index)
     for player_id in draft.players:
         player = await bot.fetch_user(player_id)
@@ -232,7 +235,8 @@ async def start_drafting(ctx):
 
     await ctx.send(
         "Phase 1: Each player must select one faction to be selectable and one optional"
-        " faction. Use !select <faction_index> <optional_faction_index>"
+        " faction. Use !select <faction_index> <optional_faction_index>. Use "
+        "!regenerate-map to regenerate the map."
     )
 
 
@@ -272,6 +276,8 @@ async def select_factions(ctx, faction_index: int, optional_faction_index: int):
     draft.final_factions.add(faction_index)
     draft.optional_factions.add(optional_faction_index)
 
+    await draft.save()  # Save after selection
+
     await ctx.send(
         f"{ctx.author.mention} has selected {faction_index}: "
         f"{FACTION_INDEX[faction_index]} as selectable and {optional_faction_index}: "
@@ -289,9 +295,19 @@ async def select_factions(ctx, faction_index: int, optional_faction_index: int):
         random.shuffle(draft.draft_order)
         draft.current_voter = 0
         draft.phase = 2
+        await draft.save()  # Save after moving to voting phase
         await ctx.send(
             "Use !vote <faction_index> to vote for an optional faction. Voting will "
             "proceed in draft order. A faction needs 2 votes to be included."
+        )
+        vote_status = []
+        for idx in sorted(draft.optional_factions):
+            count = len(draft.votes.get(idx, set()))
+            vote_status.append(
+                f"{idx}: {FACTION_INDEX[idx]} ({count} vote{'s' if count != 1 else ''})"
+            )
+        await ctx.send(
+            "Optional factions available to vote for:\n" + "\n".join(vote_status)
         )
         await ctx.send("Voting order:")
         for i, player_id in enumerate(draft.draft_order):
@@ -349,6 +365,8 @@ async def vote_faction(ctx, faction_index: int):
             " and is now selectable!"
         )
 
+    await draft.save()  # Save after voting
+
     # Move to next voter
     draft.current_voter += 1
     if draft.current_voter >= len(draft.draft_order):
@@ -365,6 +383,7 @@ async def vote_faction(ctx, faction_index: int):
             "Locations, and Strategy Order."
         )
         draft.phase = 3
+        await draft.save()  # Save after moving to snake draft
         # Set up snake draft order (reuse draft.draft_order)
         await ctx.send("Draft order:")
         for i, player_id in enumerate(draft.draft_order):
@@ -375,7 +394,30 @@ async def vote_faction(ctx, faction_index: int):
             "Use !pick <faction/location/strategy> <value> to make your selection."
         )
         await ctx.send(f"Map URL: {draft.map_url}")
-        await ctx.send(f"Available factions: ")
+        available_factions = [
+            f"{idx}: {FACTION_INDEX[idx]}" for idx in sorted(draft.final_factions)
+        ]
+        await ctx.send(
+            "Available factions: "
+            + (", ".join(available_factions) if available_factions else "None")
+        )
+        await ctx.send(
+            "Available locations (1 is the top of the map, 2 is the next clockwise,"
+            " and so on): "
+            + (
+                ", ".join(map(str, draft.available_locations))
+                if draft.available_locations
+                else "None"
+            )
+        )
+        await ctx.send(
+            "Available strategy orders: "
+            + (
+                ", ".join(map(str, draft.available_strategies))
+                if draft.available_strategies
+                else "None"
+            )
+        )
         await ctx.send(f"It's {first_player.mention}'s turn to pick!")
     else:
         # Print the current vote counts for each faction
@@ -464,6 +506,8 @@ async def pick_selection(ctx, selection_type: str, value: str):
             await ctx.send("Strategy must be a number!")
             return
 
+    await draft.save()  # Save after each pick
+
     if selection_type == "faction":
         await ctx.send(
             f"{ctx.author.mention} has selected {faction_index}: "
@@ -525,15 +569,27 @@ async def pick_selection(ctx, selection_type: str, value: str):
                 if idx not in picked_factions
             ]
             messages.append(
-                f"Available factions: {', '.join(available_factions) if available_factions else 'None'}"
+                "Available factions: "
+                + (", ".join(available_factions) if available_factions else "None")
             )
         if choices["location"] is None:
             messages.append(
-                f"Available locations: {', '.join(map(str, draft.available_locations)) if draft.available_locations else 'None'}"
+                "Available locations (1 is the top of the map, 2 is the next clockwise,"
+                " and so on): "
+                + (
+                    ", ".join(map(str, draft.available_locations))
+                    if draft.available_locations
+                    else "None"
+                )
             )
         if choices["strategy"] is None:
             messages.append(
-                f"Available strategy orders: {', '.join(map(str, draft.available_strategies)) if draft.available_strategies else 'None'}"
+                "Available strategy orders: "
+                + (
+                    ", ".join(map(str, draft.available_strategies))
+                    if draft.available_strategies
+                    else "None"
+                )
             )
         if messages:
             await ctx.send("\n".join(messages))
@@ -541,18 +597,6 @@ async def pick_selection(ctx, selection_type: str, value: str):
         await ctx.send(
             "Use !pick <faction/location/strategy> <value> to make your selection."
         )
-
-
-@bot.command(name="save")
-async def save_draft(ctx):
-    """Save the current draft state to a file."""
-    if ctx.channel.id not in active_drafts:
-        await ctx.send("No draft is currently in progress!")
-        return
-
-    draft = active_drafts[ctx.channel.id]
-    await draft.save()
-    await ctx.send("Draft state saved successfully!")
 
 
 @bot.command(name="load")
@@ -613,7 +657,8 @@ async def list_factions(ctx):
             )
         )
         await ctx.send(
-            f"Available locations: {', '.join(map(str, draft.available_locations))}"
+            "Available locations (1 is the top of the map, 2 is the next clockwise, "
+            f"and so on): {', '.join(map(str, draft.available_locations))}"
         )
         await ctx.send(
             f"Available strategy orders: "
@@ -622,6 +667,24 @@ async def list_factions(ctx):
         await ctx.send(f"Map URL: {draft.map_url}")
     else:
         await ctx.send("The draft is not in progress!")
+
+
+@bot.command(name="regenerate-map")
+async def regenerate_map(ctx):
+    """Regenerate the map URL."""
+    if ctx.channel.id not in active_drafts:
+        await ctx.send("No draft is currently in progress!")
+        return
+    if ctx.author.id not in active_drafts[ctx.channel.id].players:
+        await ctx.send("You're not part of this draft!")
+        return
+    if active_drafts[ctx.channel.id].phase != 1:
+        await ctx.send("You can only regenerate the map URL in Phase 1!")
+        return
+
+    draft = active_drafts[ctx.channel.id]
+    await draft.initialize()
+    await ctx.send(f"Map URL regenerated: {draft.map_url}")
 
 
 def main():

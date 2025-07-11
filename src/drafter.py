@@ -221,8 +221,18 @@ async def start_drafting(ctx):
 
     # Assign 4 random factions to each player (by index)
     all_indices = list(FACTION_INDEX.keys())
+    random.shuffle(all_indices)
+    assigned = set()
     for player_id in draft.players:
-        draft.player_factions[player_id] = random.sample(all_indices, 4)
+        # Pick 4 factions not already assigned
+        available = [idx for idx in all_indices if idx not in assigned]
+        if len(available) < 4:
+            # Not enough unique factions left, reshuffle unassigned
+            remaining_needed = 4 - len(available)
+            available += random.sample(list(assigned), remaining_needed)
+        player_factions = random.sample(available, 4)
+        draft.player_factions[player_id] = player_factions
+        assigned.update(player_factions)
 
     await draft.save()  # Save after assigning factions
 
